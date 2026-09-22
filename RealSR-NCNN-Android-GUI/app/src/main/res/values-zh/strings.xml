@@ -249,6 +249,7 @@
     <string name="dir_input_path_error">无法获取输入目录路径，请选择有效目录</string>
     <string name="dir_input_invalid">输入路径不是有效的目录</string>
     <string name="dir_output_path_error">请指定输出目录</string>
+    <string name="dir_output_invalid">输出目录无法访问，请重新选择</string>
     <string name="dir_input_hint">输入目录路径或使用浏览按钮选择</string>
     <string name="dir_output_hint">输出目录路径或使用浏览按钮选择</string>
     <string name="dir_auto_output_label">自动</string>

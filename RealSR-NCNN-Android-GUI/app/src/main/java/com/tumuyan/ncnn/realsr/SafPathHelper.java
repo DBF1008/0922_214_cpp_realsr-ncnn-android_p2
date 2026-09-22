@@ -28,6 +28,15 @@ public class SafPathHelper {
     }
 
     /**
+     * Checks whether a string looks like a SAF content URI ("content://...").
+     * Useful when only the displayed text is available (e.g. an EditText that
+     * ended up showing the raw URI because no filesystem path could be derived).
+     */
+    public static boolean isSafUriString(String s) {
+        return SafPathResolver.isSafUriString(s);
+    }
+
+    /**
      * Validates a SAF tree URI by wrapping it as a DocumentFile and checking
      * that it represents an existing, accessible directory.
      *
@@ -65,27 +74,15 @@ public class SafPathHelper {
 
     /**
      * Pure path-construction logic shared by {@link #getAbsolutePathFromDocId(String)}
-     * and unit tests.  Takes an explicit storage base so it can run on the JVM
-     * without the Android framework.
+     * and unit tests.  Delegates to {@link SafPathResolver} so the logic can be
+     * compiled and tested on a plain JVM without the Android framework.
      *
      * @param docId          the tree document ID (may be null)
      * @param storageBase    the external-storage root (e.g. "/storage/emulated/0")
      * @return an absolute path, or empty string when docId is null
      */
     static String resolveTreeDocIdToPath(String docId, String storageBase) {
-        if (docId == null) return "";
-        if (docId.contains(":")) {
-            String[] split = docId.split(":", 2);
-            if (split.length == 2) {
-                if ("primary".equals(split[0])) {
-                    return storageBase + "/" + split[1];
-                } else {
-                    return "/storage/" + split[0] + "/" + split[1];
-                }
-            }
-        }
-        // docId without colon separator (e.g. some third-party providers)
-        return storageBase + "/" + docId;
+        return SafPathResolver.resolveTreeDocIdToPath(docId, storageBase);
     }
 
     /**
@@ -114,25 +111,14 @@ public class SafPathHelper {
 
     /**
      * Extracts a human-readable directory name from a tree document ID.
-     * Pure string logic — no Android framework dependency.
+     * Delegates to {@link SafPathResolver} (pure string logic — no Android
+     * framework dependency).
      *
      * @param docId the tree document ID (e.g. "primary:DCIM/Photos")
      * @return the last path component, or null if docId is unusable
      */
     static String extractTreeDisplayName(String docId) {
-        if (docId == null || docId.isEmpty()) return null;
-        if (docId.contains(":")) {
-            String[] split = docId.split(":", 2);
-            if (split.length == 2 && !split[1].isEmpty()) {
-                String path = split[1];
-                int lastSlash = path.lastIndexOf('/');
-                if (lastSlash >= 0 && lastSlash < path.length() - 1) {
-                    return path.substring(lastSlash + 1);
-                }
-                return path;
-            }
-        }
-        return docId;
+        return SafPathResolver.extractTreeDisplayName(docId);
     }
 
     /**

@@ -26,7 +26,6 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.documentfile.provider.DocumentFile;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -39,6 +38,25 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
     private static final int REQUEST_CODE_INPUT_DIR = 1001;
     private static final int REQUEST_CODE_OUTPUT_DIR = 1002;
+
+    /**
+     * Filesystem probe backed by java.io.File.  Only consulted for manually
+     * typed paths — SAF-picked directories are validated through their URI
+     * grant instead, because File.exists() fails for non-primary storage,
+     * SD cards and several vendor document providers.
+     */
+    private static final DirectoryBatchValidator.PathProbe FILE_PROBE =
+            new DirectoryBatchValidator.PathProbe() {
+                @Override
+                public boolean exists(String path) {
+                    return new File(path).exists();
+                }
+
+                @Override
+                public boolean isDirectory(String path) {
+                    return new File(path).isDirectory();
+                }
+            };
 
     private Uri inputDirUri;
     private Uri outputDirUri;
@@ -339,18 +357,19 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
         if (resultCode == RESULT_OK && data != null) {
             Uri treeUri = data.getData();
+            if (treeUri == null) {
+                return;
+            }
 
             isSettingFromActivity = true;
             if (requestCode == REQUEST_CODE_INPUT_DIR) {
                 inputDirUri = treeUri;
-                getContentResolver().takePersistableUriPermission(treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                takePersistablePermission(treeUri);
                 String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 etInputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
             } else if (requestCode == REQUEST_CODE_OUTPUT_DIR) {
                 outputDirUri = treeUri;
-                getContentResolver().takePersistableUriPermission(treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                takePersistablePermission(treeUri);
                 String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 etOutputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
                 if (cbAutoOutput.isChecked()) {
@@ -359,6 +378,21 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             }
             isSettingFromActivity = false;
             updateStartButtonState();
+        }
+    }
+
+    /**
+     * Persists read/write permission for a picked tree URI.  Some document
+     * providers do not offer persistable permissions and throw
+     * SecurityException — the transient grant still covers the current
+     * session, so log and continue instead of crashing.
+     */
+    private void takePersistablePermission(Uri treeUri) {
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (SecurityException e) {
+            Log.w("DirectoryProcess", "Persistable permission not granted for " + treeUri, e);
         }
     }
 
@@ -373,26 +407,21 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         String inputPath = etInputDirPath.getText().toString().trim();
         String outputPath = etOutputDirPath.getText().toString().trim();
 
-        boolean inputValid;
-        if (inputDirUri != null && SafPathHelper.isSafUri(inputDirUri)) {
-            // Validation via SAF — works for SD cards, non-primary storage,
-            // and third-party document providers where File.exists() fails.
-            inputValid = SafPathHelper.isValidTreeUri(inputDirUri, this);
-        } else {
-            inputValid = !inputPath.isEmpty()
-                    && new File(inputPath).exists()
-                    && new File(inputPath).isDirectory();
-        }
+        // Validation via SAF whenever a tree URI is stored — works for SD
+        // cards, non-primary storage, and third-party document providers
+        // where File.exists() fails.  File probing is only a fallback for
+        // manually typed paths.
+        boolean inputUseSaf = inputDirUri != null && SafPathHelper.isSafUri(inputDirUri);
+        boolean outputUseSaf = outputDirUri != null && SafPathHelper.isSafUri(outputDirUri);
 
-        boolean outputValid;
-        if (outputDirUri != null && SafPathHelper.isSafUri(outputDirUri)) {
-            outputValid = SafPathHelper.isValidTreeUri(outputDirUri, this);
-        } else {
-            outputValid = !outputPath.isEmpty();
-        }
+        boolean inputValid = DirectoryBatchValidator.isInputValid(inputUseSaf,
+                inputUseSaf && SafPathHelper.isValidTreeUri(inputDirUri, this),
+                inputPath, FILE_PROBE);
+        boolean outputValid = DirectoryBatchValidator.isOutputValid(outputUseSaf,
+                outputUseSaf && SafPathHelper.isValidTreeUri(outputDirUri, this),
+                outputPath);
 
-        boolean canStart = inputValid && outputValid;
-        btnStartProcess.setEnabled(canStart);
+        btnStartProcess.setEnabled(DirectoryBatchValidator.canStart(inputValid, outputValid));
     }
 
     private void startBatchProcess() {
@@ -412,21 +441,23 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         // Validate input directory: prefer SAF URI validation when available.
         // File.exists()/isDirectory() fails for non-primary storage (SD cards,
         // USB OTG) and some vendor document providers even when SAF grants access.
-        if (inputDirUri != null && SafPathHelper.isSafUri(inputDirUri)) {
-            if (!SafPathHelper.isValidTreeUri(inputDirUri, this)) {
-                Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
-                return;
-            }
-        } else {
-            File inputDir = new File(inputPath);
-            if (!inputDir.exists() || !inputDir.isDirectory()) {
-                Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
-                return;
-            }
+        boolean inputUseSaf = inputDirUri != null && SafPathHelper.isSafUri(inputDirUri);
+        if (!DirectoryBatchValidator.isInputValid(inputUseSaf,
+                inputUseSaf && SafPathHelper.isValidTreeUri(inputDirUri, this),
+                inputPath, FILE_PROBE)) {
+            Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
+            return;
         }
 
-        if (outputPath.isEmpty()) {
-            Toast.makeText(this, R.string.dir_output_path_error, Toast.LENGTH_SHORT).show();
+        // Validate output directory the same way: a SAF-picked output must
+        // still hold a valid grant; a typed path only needs to be non-empty.
+        boolean outputUseSaf = outputDirUri != null && SafPathHelper.isSafUri(outputDirUri);
+        if (!DirectoryBatchValidator.isOutputValid(outputUseSaf,
+                outputUseSaf && SafPathHelper.isValidTreeUri(outputDirUri, this),
+                outputPath)) {
+            Toast.makeText(this, outputUseSaf
+                    ? R.string.dir_output_invalid
+                    : R.string.dir_output_path_error, Toast.LENGTH_SHORT).show();
             return;
         }
 
