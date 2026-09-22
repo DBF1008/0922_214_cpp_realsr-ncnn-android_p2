@@ -28,6 +28,20 @@ public class SafPathHelper {
     }
 
     /**
+     * Checks whether a string typed/pasted into a path field is actually a
+     * SAF content URI rather than a filesystem path.  Such a string can appear
+     * in the path EditText when a tree URI cannot be mapped to a filesystem
+     * path; it must never be treated as a valid directory path.
+     * Pure string logic — no Android framework dependency.
+     *
+     * @param text the text to inspect (may be null)
+     * @return true if the text looks like a content:// URI
+     */
+    public static boolean isContentUriString(String text) {
+        return text != null && text.startsWith("content://");
+    }
+
+    /**
      * Validates a SAF tree URI by wrapping it as a DocumentFile and checking
      * that it represents an existing, accessible directory.
      *

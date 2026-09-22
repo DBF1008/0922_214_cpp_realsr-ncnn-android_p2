@@ -201,4 +201,65 @@ public class SafPathHelperTest {
         String path = SafPathHelper.resolveTreeDocIdToPath("my-doc-folder", STORAGE_BASE);
         assertEquals(STORAGE_BASE + "/my-doc-folder", path);
     }
+
+    // ---------------------------------------------------------------
+    // isContentUriString — guards against treating a displayed
+    // content:// URI as a filesystem path
+    // ---------------------------------------------------------------
+
+    @Test
+    public void isContentUriString_treeUri_isDetected() {
+        assertTrue(SafPathHelper.isContentUriString(
+                "content://com.android.externalstorage.documents/tree/primary%3ADCIM"));
+    }
+
+    @Test
+    public void isContentUriString_sdCardTreeUri_isDetected() {
+        assertTrue(SafPathHelper.isContentUriString(
+                "content://com.android.externalstorage.documents/tree/ABCD-1234%3APhotos"));
+    }
+
+    @Test
+    public void isContentUriString_vendorProviderUri_isDetected() {
+        assertTrue(SafPathHelper.isContentUriString(
+                "content://com.vendor.provider.documents/tree/some-doc"));
+    }
+
+    @Test
+    public void isContentUriString_absolutePath_isNotDetected() {
+        assertFalse(SafPathHelper.isContentUriString("/storage/emulated/0/DCIM"));
+        assertFalse(SafPathHelper.isContentUriString("/storage/ABCD-1234/DCIM"));
+    }
+
+    @Test
+    public void isContentUriString_fileUri_isNotDetected() {
+        // file:// URIs are not SAF content URIs
+        assertFalse(SafPathHelper.isContentUriString("file:///storage/emulated/0/DCIM"));
+    }
+
+    @Test
+    public void isContentUriString_nullAndEmpty_areNotDetected() {
+        assertFalse(SafPathHelper.isContentUriString(null));
+        assertFalse(SafPathHelper.isContentUriString(""));
+    }
+
+    // ---------------------------------------------------------------
+    // Regression: raw content URI in the path field must never be
+    // accepted as a valid directory path
+    // ---------------------------------------------------------------
+
+    @Test
+    public void regression_contentUriString_isNotAUsablePath() {
+        // Scenario: a tree URI could not be mapped to a filesystem path, so
+        // the EditText shows the raw URI.  After process death the in-memory
+        // Uri is gone; the old code would run File.exists("content://..."),
+        // get false, and permanently disable Start.  The new code rejects the
+        // string explicitly (and restores the persisted URI instead).
+        String displayed = "content://com.android.externalstorage.documents/tree/ABCD-1234%3ADCIM";
+        assertTrue(SafPathHelper.isContentUriString(displayed));
+        // A real filesystem path derived from the same tree is accepted.
+        String derived = SafPathHelper.resolveTreeDocIdToPath("ABCD-1234:DCIM", STORAGE_BASE);
+        assertFalse(SafPathHelper.isContentUriString(derived));
+        assertEquals("/storage/ABCD-1234/DCIM", derived);
+    }
 }

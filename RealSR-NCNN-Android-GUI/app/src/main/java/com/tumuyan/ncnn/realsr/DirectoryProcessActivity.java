@@ -40,8 +40,17 @@ public class DirectoryProcessActivity extends AppCompatActivity {
     private static final int REQUEST_CODE_INPUT_DIR = 1001;
     private static final int REQUEST_CODE_OUTPUT_DIR = 1002;
 
+    // SharedPreferences keys for persisted SAF tree URIs.  The URI permission
+    // is persisted via takePersistableUriPermission(); persisting the URI
+    // string itself lets the activity restore SAF-based validation after
+    // recreation (rotation, process death) instead of falling back to
+    // File.exists() on a path that may not be visible to the app.
+    private static final String PREF_INPUT_DIR_URI = "dirInputTreeUri";
+    private static final String PREF_OUTPUT_DIR_URI = "dirOutputTreeUri";
+
     private Uri inputDirUri;
     private Uri outputDirUri;
+    private SharedPreferences sp;
 
     private EditText etInputDirPath, etOutputDirPath;
     private TextView tvLog, tvTitle;
@@ -122,7 +131,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
     }
 
     private void loadSettings() {
-        SharedPreferences sp = getSharedPreferences("config", MODE_PRIVATE);
+        sp = getSharedPreferences("config", MODE_PRIVATE);
         tileSize = sp.getInt("tileSize", 0);
         useCPU = sp.getBoolean("useCPU", false);
         threadCount = sp.getString("threadCount", "");
@@ -170,6 +179,40 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         spinnerModel.setAdapter(adapter);
 
         spinnerModel.setSelection(0);
+
+        restorePersistedDirUris();
+    }
+
+    /**
+     * Restores previously persisted SAF tree URIs (and their display paths)
+     * so that SAF-based validation survives activity recreation.  URIs whose
+     * persisted permission was revoked or whose document no longer exists are
+     * dropped from preferences.
+     */
+    private void restorePersistedDirUris() {
+        String inUri = sp.getString(PREF_INPUT_DIR_URI, "");
+        if (!inUri.isEmpty()) {
+            Uri uri = Uri.parse(inUri);
+            if (SafPathHelper.isValidTreeUri(uri, this)) {
+                inputDirUri = uri;
+                String path = SafPathHelper.getAbsolutePathFromTreeUri(uri);
+                etInputDirPath.setText(path.isEmpty() ? inUri : path);
+            } else {
+                sp.edit().remove(PREF_INPUT_DIR_URI).apply();
+            }
+        }
+
+        String outUri = sp.getString(PREF_OUTPUT_DIR_URI, "");
+        if (!outUri.isEmpty()) {
+            Uri uri = Uri.parse(outUri);
+            if (SafPathHelper.isValidTreeUri(uri, this)) {
+                outputDirUri = uri;
+                String path = SafPathHelper.getAbsolutePathFromTreeUri(uri);
+                etOutputDirPath.setText(path.isEmpty() ? outUri : path);
+            } else {
+                sp.edit().remove(PREF_OUTPUT_DIR_URI).apply();
+            }
+        }
     }
 
     private void setupListeners() {
@@ -211,6 +254,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 }
                 // User manually edited — clear stored SAF URI
                 inputDirUri = null;
+                sp.edit().remove(PREF_INPUT_DIR_URI).apply();
                 String path = s.toString().trim();
                 if (!path.isEmpty()) {
                     File file = new File(path);
@@ -237,6 +281,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 }
                 // User manually edited — clear stored SAF URI
                 outputDirUri = null;
+                sp.edit().remove(PREF_OUTPUT_DIR_URI).apply();
                 if (!isUpdatingOutputPath && cbAutoOutput.isChecked()) {
                     cbAutoOutput.setChecked(false);
                 }
@@ -343,14 +388,14 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             isSettingFromActivity = true;
             if (requestCode == REQUEST_CODE_INPUT_DIR) {
                 inputDirUri = treeUri;
-                getContentResolver().takePersistableUriPermission(treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                persistUriPermission(treeUri);
+                sp.edit().putString(PREF_INPUT_DIR_URI, treeUri.toString()).apply();
                 String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 etInputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
             } else if (requestCode == REQUEST_CODE_OUTPUT_DIR) {
                 outputDirUri = treeUri;
-                getContentResolver().takePersistableUriPermission(treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                persistUriPermission(treeUri);
+                sp.edit().putString(PREF_OUTPUT_DIR_URI, treeUri.toString()).apply();
                 String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 etOutputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
                 if (cbAutoOutput.isChecked()) {
@@ -359,6 +404,20 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             }
             isSettingFromActivity = false;
             updateStartButtonState();
+        }
+    }
+
+    /**
+     * Best-effort persist of the URI permission.  Some document providers do
+     * not offer persistable grants and throw SecurityException; that must not
+     * crash the picker flow — the URI still works for the current session.
+     */
+    private void persistUriPermission(Uri treeUri) {
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (Exception e) {
+            Log.w("DirectoryProcess", "takePersistableUriPermission failed for " + treeUri, e);
         }
     }
 
@@ -379,7 +438,10 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             // and third-party document providers where File.exists() fails.
             inputValid = SafPathHelper.isValidTreeUri(inputDirUri, this);
         } else {
+            // A raw content:// string without a held URI+permission is never
+            // a usable filesystem path — reject it instead of File.exists().
             inputValid = !inputPath.isEmpty()
+                    && !SafPathHelper.isContentUriString(inputPath)
                     && new File(inputPath).exists()
                     && new File(inputPath).isDirectory();
         }
@@ -388,7 +450,8 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         if (outputDirUri != null && SafPathHelper.isSafUri(outputDirUri)) {
             outputValid = SafPathHelper.isValidTreeUri(outputDirUri, this);
         } else {
-            outputValid = !outputPath.isEmpty();
+            outputValid = !outputPath.isEmpty()
+                    && !SafPathHelper.isContentUriString(outputPath);
         }
 
         boolean canStart = inputValid && outputValid;
@@ -417,7 +480,22 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
                 return;
             }
+            // Re-derive the real filesystem path for the native command from
+            // the URI instead of trusting the displayed text, which may be a
+            // content:// fallback string that the native binary cannot open.
+            String derived = SafPathHelper.getAbsolutePathFromTreeUri(inputDirUri);
+            if (derived.isEmpty()) {
+                Toast.makeText(this, R.string.dir_uri_path_unresolved, Toast.LENGTH_LONG).show();
+                return;
+            }
+            inputPath = derived;
         } else {
+            if (SafPathHelper.isContentUriString(inputPath)) {
+                // Displayed text is a raw SAF URI but we hold no permission
+                // for it (e.g. process restarted without persisted grant).
+                Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
+                return;
+            }
             File inputDir = new File(inputPath);
             if (!inputDir.exists() || !inputDir.isDirectory()) {
                 Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
@@ -427,6 +505,23 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
         if (outputPath.isEmpty()) {
             Toast.makeText(this, R.string.dir_output_path_error, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Same SAF treatment for the output directory.
+        if (outputDirUri != null && SafPathHelper.isSafUri(outputDirUri)) {
+            if (!SafPathHelper.isValidTreeUri(outputDirUri, this)) {
+                Toast.makeText(this, R.string.dir_output_invalid, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String derived = SafPathHelper.getAbsolutePathFromTreeUri(outputDirUri);
+            if (derived.isEmpty()) {
+                Toast.makeText(this, R.string.dir_uri_path_unresolved, Toast.LENGTH_LONG).show();
+                return;
+            }
+            outputPath = derived;
+        } else if (SafPathHelper.isContentUriString(outputPath)) {
+            Toast.makeText(this, R.string.dir_output_invalid, Toast.LENGTH_SHORT).show();
             return;
         }
 
